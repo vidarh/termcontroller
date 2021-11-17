@@ -15,8 +15,6 @@ require 'io/console'
 # and then dispatching "binding.pry" and re-enable the processing when
 # it returns.
 #
-# FIXME: Split it into a separate gem.
-#
 # FIXME: Should probably treat this as a singleton.
 #
 #
@@ -28,7 +26,7 @@ module Termcontroller
     attr_accessor :mode
 
     @@con = IO.console
-  
+
     # Pause *any* Controller instance
     @@pause = false
     def self.pause!
@@ -55,11 +53,11 @@ module Termcontroller
       @kb = KeyboardMap.new
       @@con = @con = IO.console
       raise if !@con
-    
+
       at_exit do
         cleanup
       end
-      
+
       trap("CONT") { resume }
 
     @t = Thread.new { readloop }
