@@ -19,6 +19,8 @@ require 'io/console'
 #
 #
 
+require 'keyboard_map'
+
 module Termcontroller
   class Controller
 
