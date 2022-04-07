@@ -235,6 +235,7 @@ module Termcontroller
   def resume
     @mode = :cooked
     setup
+    @commands << [:resume]
   end
 end
 end
