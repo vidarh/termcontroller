@@ -49,7 +49,7 @@ module Termcontroller
       @target = target
       @keybindings = keybindings
       @buf = ""
-      @commands = []
+      @commands = Queue.new
       @mode = :cooked
 
       @kb = KeyboardMap.new
@@ -203,15 +203,10 @@ module Termcontroller
       #return nil if !c
     end
     @commands << c
-    Thread.pass
   end
 
   def next_command
-    if @commands.empty?
-      sleep(0.001)
-      Thread.pass
-    end
-    @commands.shift
+    @commands.pop
   end
 
   def handle_input(prefix="",timeout=0.1)
