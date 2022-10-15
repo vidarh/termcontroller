@@ -4,6 +4,12 @@ A very basic Controller (in the MVC sense) for Ruby terminal
 applications. This was pulled out of my text editor,
 [Re](https://github.com/vidarh/re).
 
+**YOU ALMOST CERTAINLY DO NOT YET WANT TO USE THIS FOR YOUR OWN CODE**
+
+I do intend to clean it up and make it usable for others, but it's not
+there yet - if you think it'd be useful for you, feel free to drop me a
+message.
+
 ## Installation
 
 Add this line to your application's Gemfile:
