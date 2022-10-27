@@ -3,5 +3,4 @@ require "termcontroller/controller"
 
 module Termcontroller
   class Error < StandardError; end
-  # Your code goes here...
 end
