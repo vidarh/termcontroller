@@ -1,6 +1,7 @@
-# coding: utf-8
+# coding utf-8
 
 require 'io/console'
+require 'fcntl'
 
 # # Controller
 #
@@ -11,9 +12,19 @@ require 'io/console'
 # the command directly to a specified target object based on the
 # key bindings.
 #
+# Note that *currently* `#handle_input` will block on retrieving a
+# command with no timeout. This is because Re is the only current
+# client of this class, and *currently* does not have a need for
+# anything async. That *will* change, as Re will eventually start
+# receiving evented updates. Current "hack" to work around this:
+# push things into the `commands` queue. This may well be the ongoing
+# way to do it, and I might consider breaking it out.
+#
 # It works well enough to e.g. allow temporarily pausing the processing
 # and then dispatching "binding.pry" and re-enable the processing when
 # it returns.
+#
+# That said there are lots of hacks in here that needs to be cleaned up
 #
 # FIXME: Should probably treat this as a singleton.
 #
@@ -22,233 +33,258 @@ require 'io/console'
 require 'keyboard_map'
 
 module Termcontroller
+  DOUBLE_CLICK_INTERVAL=0.5
+
   class Controller
+    @@controllers = []
 
-    attr_reader :lastcmd,:lastkey,:lastchar
-    attr_accessor :mode
+    attr_reader :lastcmd, :commands
 
-    @@con = IO.console
+    def initialize(target=nil, keybindings={})
+      @m = Mutex.new
 
-    # Pause *any* Controller instance
-    @@pause = false
-    def self.pause!
-      old = @@pause
-      @@pause = true
-      @@con.cooked do
-        yield
-      end
-    ensure
-      @@pause = old
-    end
-
-    def paused?
-      @mode == :pause || @@pause
-    end
-
-    def initialize(target, keybindings)
       @target = target
+      @target_stack = []
+
       @keybindings = keybindings
       @buf = ""
       @commands = Queue.new
       @mode = :cooked
 
       @kb = KeyboardMap.new
-      @@con = @con = IO.console
+      @con = IO.console
       raise if !@con
 
-      at_exit do
-        cleanup
-      end
+      at_exit { quit }
+      trap("CONT")  { resume }
+      trap("WINCH") { @commands << :resize }
 
-      trap("CONT") { resume }
+      setup
 
-    @t = Thread.new { readloop }
-  end
+      @t = Thread.new { readloop }
 
-  def setup
-    STDOUT.print "\e[?2004h" # Enable bracketed paste
-    STDOUT.print "\e[?1000h" # Enable mouse reporting
-    STDOUT.print "\e[?1006h" # Enable extended reporting
-  end
+      @@controllers << @t
 
-  def cleanup
-    STDOUT.print "\e[?2004l" #Disable bracketed paste
-    STDOUT.print "\e[?1000l" #Disable mouse reporting
-  end
+    end
 
-  def readloop
-    loop do
-      if paused?
-        sleep(0.05)
-      elsif @mode == :cooked
-        read_input
-      else
-        fill_buf
+    def paused?; @mode == :pause; end
+
+    def push_target(t)
+      @target_stack << @target
+      @target = t
+    end
+
+    def pop_target
+      t = @target
+      @target = @target_stack.pop
+      t
+    end
+
+
+    #
+    # Pause processing so you can read directly from stdin
+    # yourself. E.g. to use Readline, or to suspend
+    #
+    def pause
+      @m.synchronize do
+        old = @mode
+        begin
+          @mode = :pause
+          IO.console.cooked!
+          cleanup
+          r = yield
+          setup
+          r
+        rescue Interrupt
+        ensure
+          @mode = old
+        end
       end
     end
-  end
 
-  def pause
-    old = @mode
-    @mode = :pause
-    sleep(0.1)
-    IO.console.cooked!
-    yield
-  rescue Interrupt
-  ensure
-    @mode = old
-  end
-
-  def fill_buf(timeout=0.1)
-    if paused?
-      sleep(0.1)
-      Thread.pass
-      return
+    # FIXME: The first event after the yield
+    # appears to fail to pass the mapping.
+    # Maybe move the mapping to the client thread?
+    def raw
+      keybindings = @keybindings
+      @keybindings = {}
+      push_target(nil)
+      yield
+    rescue Interrupt
+    ensure
+      @keybindings = keybindings
+      pop_target
     end
-    @con.raw!
-    return if !IO.select([$stdin],nil,nil,0.1)
-    str = $stdin.read_nonblock(4096)
-    str.force_encoding("utf-8")
-    @buf << str
-  rescue IO::WaitReadable
-  end
 
-  def getc(timeout=0.1)
-    if !paused?
+    def handle_input
+      if c = @commands.pop
+        do_command(c)
+      end
+      return Array(c)
+    end
+
+    def suspend
+      pause do
+        yield if block_given?
+        Process.kill("STOP", 0)
+      end
+    end
+
+    def resume
+      @mode = :cooked
+      setup
+      @commands << [:resume]
+    end
+
+    private # # ########################################################
+
+    def setup
+      STDOUT.print "\e[?2004h" # Enable bracketed paste
+      STDOUT.print "\e[?1000h" # Enable mouse reporting
+      STDOUT.print "\e[?1002h" # Enable mouse *move when clicked* reporting
+      STDOUT.print "\e[?1006h" # Enable extended reporting
+      STDOUT.print "\e[?25l"   # Hide cursor
+      @con.raw!
+    end
+
+    def cleanup
+      # Some programs, like more and docker struggles if the terminal
+      # is not returned to blocking mode
+      stdin_flags = STDIN.fcntl(Fcntl::F_GETFL)
+      STDIN.fcntl(Fcntl::F_SETFL, stdin_flags & ~Fcntl::O_NONBLOCK) #
+
+      @con.cooked!
+      STDOUT.print "\e[?2004l" #Disable bracketed paste
+      STDOUT.print "\e[?1000l" #Disable mouse reporting
+      STDOUT.print "\e[?25h"   # Show cursor
+    end
+
+    def quit
+      @@controllers.each {|t| t.kill }
+      cleanup
+    end
+
+
+    def fill_buf
+      # We do this to ensure the other thread gets a chance
+      sleep(0.01)
+
+      @m.synchronize do
+        @con.raw!
+        return if !IO.select([$stdin],nil,nil,0.1)
+        str = $stdin.read_nonblock(4096)
+
+        # FIXME...
+        str.force_encoding("utf-8")
+        @buf << str
+      end
+    rescue IO::WaitReadable
+    end
+
+
+    def getc
       while @buf.empty?
         fill_buf
       end
       @buf.slice!(0) if !paused? && @mode == :cooked
-    else
-      sleep(0.1)
-      Thread.pass
-      return nil
+    rescue Interrupt
     end
-  rescue Interrupt
-  end
 
-  def raw
-    @mode = :raw
-    yield
-  rescue Interrupt
-  ensure
-    @mode = :cooked
-  end
+    # We do this because @keybindings can be changed
+    # on the main thread if the client changes the bindings,
+    # e.g. by calling `#raw`. This is the *only* sanctioned
+    # way to look up the binding.
+    #
+    def map(key, map = @keybindings)
+      map && key ? map[key.to_sym] : nil
+    end
 
-  def read_char
-    sleep(0.01) if @buf.empty?
-    @buf.slice!(0)
-  rescue Interrupt
-  end
+    def get_command
+      # Keep track of compound mapping
+      cmap = nil
+      cmdstr = ""
 
-  def get_command
-    map = @keybindings
-    loop do
-      c = nil
-      char = getc
-      return nil if !char
+      loop do
+        c = nil
+        char = getc
+        return nil if !char
 
-      c1 = Array(@kb.call(char)).first
-      c = map[c1.to_sym] if c1
+        a = Array(@kb.call(char))
+        c1 = a.first
 
-      if c.nil? && c1.kind_of?(String)
-        return [:insert_char, c1]
-      end
+        if c1 == :mouse_up
+          t  = Time.now
+          dt = @lastclick ? t - @lastclick : 999
+          if dt < DOUBLE_CLICK_INTERVAL
+            c1 = :mouse_doubleclick
+          else
+            c1 = :mouse_click
+          end
+          @lastclick = t
+        end
 
-      if c.nil?
-        if c1
-          @lastchar = c1.to_sym
-          args = c1.respond_to?(:args) ? c1.args : []
-          return Array(c1.to_sym).concat(args || [])
+        c = map(c1, cmap || @keybindings)
+
+        if c.nil? && c1.kind_of?(String)
+          return [:char, c1]
+        end
+
+        if c.nil?
+          if c1
+            args = c1.respond_to?(:args) ? c1.args : []
+            @lastcmd = cmdstr + c1.to_sym.to_s
+            return Array(c1.to_sym).concat(args || [])
+          else
+            @lastcmd = cmdstr + char.inspect
+            return nil
+          end
+        end
+
+        str = c1.to_sym.to_s.split("_").join(" ")
+        if cmdstr.empty?
+          cmdstr = str
         else
-          @lastchar = char.inspect
-          return nil
+          cmdstr += " + " + str
+        end
+
+        if c.kind_of?(Hash) # Compound mapping
+          cmap = c
+        else
+          @lastcmd = cmdstr + " (#{c.to_s})" if c.to_s != @lastcmd
+          return c
         end
       end
+    end
 
-      if c.kind_of?(Hash)
-        map = c
-      else
-        @lastchar = c1.to_sym.to_s.split("_").join(" ")
-        @lastchar += " (#{c.to_s})" if c.to_s != @lastchar
-        return c
+    def read_input
+      c = get_command
+      if !c
+        Thread.pass
+        return
+      end
+
+      @commands << c
+    end
+
+    def readloop
+      loop do
+        if @mode == :cooked
+          read_input
+        else
+          fill_buf
+        end
       end
     end
-  end
 
-  def do_command(c)
-    return nil if !c
-    if @target.respond_to?(Array(c).first)
-      @lastcmd = c
-      @target.instance_eval { send(*Array(c)) }
-    else
-      @lastchar = "Unbound: #{Array(c).first.inspect}"
+    def do_command(c)
+      return nil if !c || !@target
+      a = Array(c)
+      if @target.respond_to?(a.first)
+        @target.instance_eval { send(*a) }
+      else
+        @lastcmd = "Unbound: #{a.first.inspect}"
+      end
     end
-  end
 
-  def read_input
-    c = get_command
-    if !c
-      Thread.pass
-      return
-    end
-    if Array(c).first == :insert_char
-      # FIXME: Attempt to combine multiple :insert_char into one.
-      #Probably should happen in get_command
-      #while (c2 = get_command) && Array(c2).first == :insert_char
-      #  c.last << c2.last
-      #end
-      #@commands << c
-      #c = c2
-      #return nil if !c
-    end
-    @commands << c
-  end
-
-  def next_command
-    @commands.pop
-  end
-
-  def handle_input(prefix="",timeout=0.1)
-    if c = next_command
-      do_command(c)
-    end
-    return c
-  end
-
-  def pry(e=nil)
-    pause do
-      cleanup
-      puts ANSI.cls
-      binding.pry
-    end
-    setup
-  end
-
-  def suspend
-    pause do
-      yield if block_given?
-      Process.kill("STOP", 0)
-    end
-  end
-
-  def resume
-    @mode = :cooked
-    setup
-    @commands << [:resume]
-  end
-end
-end
-
-at_exit do
-  #
-  # FIXME: This is a workaround for Controller putting
-  # STDIN into nonblocking mode and not cleaning up, which
-  # causes all kind of problems with a variety of tools (more,
-  # docker etc.) which expect it to be blocking.
-  Termcontroller::Controller.pause! do
-    stdin_flags = STDIN.fcntl(Fcntl::F_GETFL)
-    STDIN.fcntl(Fcntl::F_SETFL, stdin_flags & ~Fcntl::O_NONBLOCK) #
-    IO.console.cooked!
   end
 end

@@ -28,7 +28,36 @@ Or install it yourself as:
 
 ## Usage
 
-TODO: Write usage instructions here
+```ruby
+require 'termcontroller'
+
+class Target
+  def initialize
+    # Second argument is a keyboard mapping.
+    @ctrl = Termcontroller::Controller.new(self, {
+      :f1 => :help
+    })
+  end
+
+  def help
+    puts "This is a help text"
+  end
+
+  def run
+    loop do
+      p @ctrl.handle_input
+      print "\r"
+    end
+  end
+
+  def ctrl_c; exit; end
+end
+
+puts "Ctrl+c to quit"
+Target.new.run
+```
+
+
 
 ## Development
 
