@@ -123,6 +123,16 @@ module Termcontroller
       return Array(c)
     end
 
+    # USE WITH CAUTION. This will pause processing,
+    # yield to the provided block if any, and then send
+    # SIGSTOP to the process.
+    #
+    # This is meant to allow for handling ctrl-z to
+    # suspend in processes that need to be able to
+    # reset the terminal to a better state before stopping.
+    #
+    # FIXME: It seems like it does not work as expected.
+    #
     def suspend
       pause do
         yield if block_given?
