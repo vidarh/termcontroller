@@ -93,11 +93,11 @@ module Termcontroller
           IO.console.cooked!
           cleanup
           r = yield
-          setup
           r
         rescue Interrupt
         ensure
           @mode = old
+          setup
         end
       end
     end
@@ -136,6 +136,14 @@ module Termcontroller
       @commands << [:resume]
     end
 
+    def hide_cursor
+      STDOUT.print "\e[?25l"   # Hide cursor
+    end
+
+    def show_cursor
+      STDOUT.print "\e[?25h"   # Show cursor
+    end
+
     private # # ########################################################
 
     def setup
@@ -143,7 +151,7 @@ module Termcontroller
       STDOUT.print "\e[?1000h" # Enable mouse reporting
       STDOUT.print "\e[?1002h" # Enable mouse *move when clicked* reporting
       STDOUT.print "\e[?1006h" # Enable extended reporting
-      STDOUT.print "\e[?25l"   # Hide cursor
+      hide_cursor
       @con.raw!
     end
 
@@ -156,7 +164,7 @@ module Termcontroller
       @con.cooked!
       STDOUT.print "\e[?2004l" #Disable bracketed paste
       STDOUT.print "\e[?1000l" #Disable mouse reporting
-      STDOUT.print "\e[?25h"   # Show cursor
+      show_cursor
     end
 
     def quit
